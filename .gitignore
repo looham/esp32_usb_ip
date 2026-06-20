@@ -1,0 +1,13 @@
+/cmake-build*
+/[Bb]uild
+/managed_components
+/.idea
+/.vscode
+/.cache
+/build*
+dependencies.lock
+/install
+/.claude/settings.local.json
+compile_commands.json
+CMakeUserPresets.json
+CLAUDE.md

@@ -1,0 +1,368 @@
+# usbipdcpp
+
+一个用于创建 usbip 服务器的 C++ 库
+
+> [English Documentation](README.md)
+
+## 功能特性
+
+- ✅ **USBIP 服务器**: 基于 libusb 实现，支持所有 libusb 兼容平台
+- ✅ **虚拟设备**: HID（鼠标、键盘）、MSC（U盘）、CDC ACM（串口）—— 无需 libusb
+- 🔌 **热插拔支持**: 自动检测设备插入/拔出（LibusbServer）
+- 🚀 **异步架构**: 使用 C++20 协程和 asio 实现高效 I/O
+- 🧩 **可扩展设计**: 提供完善的抽象接口供开发者扩展
+
+欢迎贡献代码！🚀
+
+> 💡 **提示**: 如果这个项目对你有用，请考虑给它一个 ⭐，这能帮助更多人发现它。
+
+---
+
+### 传输数据载体
+
+传输数据通过 [`TransferHandle`](include/protocol.h) 类管理，这是一个 RAII 包装类，析构时自动释放传输句柄。支持移动语义转移所有权，注意 `release()` 方法会放弃所有权，需手动释放。
+
+---
+
+## 架构设计
+
+USB 通信和网络通信都是 I/O 密集型任务，本项目采用全异步架构：
+
+- 使用 asio 异步通信
+- 使用 libusb 异步接口处理 USB 通信
+
+### 为什么不用 C++20 协程
+
+早期版本曾使用 C++20 协程，但后来移除了，原因如下：
+
+1. **架构不匹配**：本项目采用"每连接一线程"模型，每个客户端连接有独立的线程和 `io_context`。协程的核心优势是"单线程处理多任务"，在这种架构下无法发挥。
+
+2. **代码复杂度**：协程版本和非协程版本的逻辑几乎相同，但需要维护两套代码，增加了维护成本。
+
+3. **编译开销**：协程相关的模板实例化会显著增加编译时间。
+
+4. **ESP32 考量**：对于嵌入式平台，更推荐使用 FreeRTOS 原生任务而非协程，或者改用单线程事件循环架构。
+
+如果未来需要支持大量并发连接（数百/数千），可以考虑重构为单 `io_context` + 协程模型，届时协程优势才能真正体现。
+
+### 依赖项
+
+| 依赖 | 是否必需 | 说明 |
+|------|----------|------|
+| asio | ✅ 必需 | 异步I/O库 |
+| spdlog | ✅ 必需 | 日志库 |
+| libusb-1.0 | 可选 | 用于物理USB设备转发 |
+| libevdev | 可选 (仅Linux) | 用于evdev输入设备转发 |
+| GTest | 可选 | 用于编译测试 |
+
+### 平台支持
+
+| 平台 | 虚拟设备 | 物理设备 (libusb) | 备注 |
+|------|----------|-------------------|------|
+| Windows | ✅ | ⚠️ 需安装WinUSB驱动 | 适合虚拟HID设备 |
+| Linux | ✅ | ✅ | 完全支持 |
+| macOS | ✅ | ✅ | 完全支持 |
+| Android (Termux) | ✅ | ✅ 通过termux-usb | 支持非root访问 |
+| ESP32 | ✅ | ✅ | 使用ESP-IDF和asio组件 |
+
+### 核心类
+
+| 类 | 说明 |
+|----|------|
+| `Server` | 主服务器类，管理设备列表并接受连接 |
+| `Session` | 表示客户端连接，处理USBIP协议 |
+| `UsbDevice` | USB设备描述符和配置 |
+| `AbstDeviceHandler` | 所有设备处理器的抽象基类 |
+| `LibusbServer` | 物理USB设备转发服务器封装（基于libusb） |
+| `StringPool` | 管理USB字符串描述符（最多255个） |
+
+### 工具类
+
+| 类 | 说明 |
+|----|------|
+| `ObjectPool<T, PoolSize, ThreadSafe>` | 固定大小对象池，用于高效内存分配。alloc O(1)，free O(log n)。 |
+
+### 虚拟设备类
+
+| 类 | 说明 |
+|----|------|
+| `VirtualDeviceHandler` | 虚拟USB设备的基类 |
+| `SimpleVirtualDeviceHandler` | 简单设备处理器，提供标准请求的空实现 |
+| `VirtualInterfaceHandler` | 实现虚拟USB接口的基类 |
+| `HidVirtualInterfaceHandler` | HID设备基类（鼠标、键盘等） |
+| `MscBulkOnlyHandler` | USB 大容量存储 BOT 协议处理器，实现 SCSI 命令处理 |
+| `StorageBackend` | 块存储后端抽象接口，为 MSC 设备提供读写能力 |
+| `RawImageBackend` | 基于内存映射的磁盘镜像文件后端（跨平台） |
+| `CdcAcmCommunicationInterfaceHandler` | CDC ACM 通信接口处理器 |
+| `CdcAcmDataInterfaceHandler` | CDC ACM 数据接口处理器 |
+
+### 类继承关系
+
+```
+AbstDeviceHandler
+├── LibusbDeviceHandler    (通过libusb的物理设备)
+└── VirtualDeviceHandler   (虚拟设备)
+    └── SimpleVirtualDeviceHandler
+```
+
+### 线程模型
+
+系统包含三个核心线程：
+
+1. **网络 I/O 线程**: 运行 `asio::io_context::run()`等待客户端连接
+2. **USB 传输线程**: 处理 `libusb_handle_events()`
+3. **主线程**: 控制服务器的行为，以及用于启动服务器
+
+每个连接会启动一个单独线程，防止某些设备的一些特殊同步操作阻塞所有设备。
+
+如果此时又启动一个线程会感觉多此一举。
+鉴于本身单个服务器的usb设备不会特别多，这种设计也是可行的。
+
+数据传输流程：
+
+```
+网络线程 → libusb_submit_transfer → USB线程 → 回调 → 网络线程
+```
+
+该架构通过最小化线程竞争实现高 CPU 效率
+
+### 虚拟设备实现
+
+开发虚拟设备时需注意：
+
+- 避免阻塞网络线程
+- 在工作线程中处理请求
+- 通过回调提交响应数据
+
+#### 为什么需要请求队列
+
+客户端只负责发送 URB，服务端负责接收。在原版 USBIP 中，服务端收到 URB 后会存储起来，然后由 USB 控制器按顺序发送给真实设备，这保证了同时只有一个 URB 在传输。
+
+虚拟设备需要模拟这个"按顺序存储 URB"的行为，因此使用请求队列（`std::deque`）来存储收到的请求，按顺序逐个处理。
+
+---
+
+## 使用指南
+
+### 代码说明
+
+> 📝 注释和日志主要使用中文，代码结构清晰易读  
+> 欢迎提交英文翻译的 PR！
+
+### 扩展功能
+
+实现自定义 USB 设备：
+
+1. 使用 `usbipdcpp::UsbDevice` 定义设备描述符
+2. 继承 `AbstDeviceHandler` 实现设备逻辑
+3. 使用 `VirtualInterfaceHandler` 处理接口操作，同时实现接口内的端点的逻辑
+
+简单设备可直接使用 `SimpleVirtualDeviceHandler`，它为标准请求提供了空实现
+
+> ⚠️ **重要提示**：重写 `VirtualInterfaceHandler::on_new_connection()` 和 `on_disconnection()` 时，**必须**调用父类实现。父类会设置/清除 `session` 指针，该指针用于提交响应数据。
+
+### 自定义 USB 字符串
+
+在启动服务器**之前**调用 `change_string_*` 修改设备字符串：
+
+**设备级字符串**（通过 `VirtualDeviceHandler`）：
+```cpp
+device_handler->change_string_manufacturer(L"我的公司");
+device_handler->change_string_product(L"我的 USB 设备");
+device_handler->change_string_serial(L"1234567890");
+device_handler->change_string_configuration(L"我的配置");
+```
+
+**接口字符串**（通过 `VirtualInterfaceHandler`）：
+```cpp
+interface_handler->change_string_interface(L"我的 HID 接口");
+```
+
+所有 `change_string_*` 方法最终调用 `StringPool::change_string()`，若字符串索引无效会抛异常。
+
+---
+
+## ⚠️ Windows 使用提示
+
+在 Windows 使用 libusb 服务器需要替换驱动：
+
+1. 使用 [Zadig](https://zadig.akeo.ie/) 安装 WinUSB 驱动
+    - 选择目标设备（找不到设备时启用"列出所有设备"）
+    - **警告**：替换鼠标/键盘驱动会导致输入失效
+2. 使用后通过设备管理器回滚驱动：
+    - `Win+X` → 设备管理器 → 选择设备 → 回滚驱动程序
+
+对于物理设备，推荐使用 [usbipd-win](https://github.com/dorssel/usbipd-win) ，
+该项目使用VBoxUSB从驱动层面实现上述功能
+本项目更适合在 Windows 实现**虚拟 USB 设备**
+
+---
+
+## 例子介绍
+
+1. libevdev_mouse
+
+   使用libevdev库，在支持evdev的系统上，通过读取`/dev/input/event*`，模拟一个usbip的鼠标，实现转发本地的鼠标信号
+2. mock_mouse
+
+   一个每隔一秒就切换鼠标左键状态的鼠标示例。用以介绍虚拟HID设备的写法
+3. mock_keyboard
+
+   一个键盘示例，每秒模拟按下和释放'A'键。展示了如何实现标准键盘报告描述符的虚拟HID键盘。
+4. multi_devices
+
+   包含10个虚拟HID设备的示例。展示了如何使用工厂模式创建多个设备。
+5. absolute_mouse
+
+   绝对坐标鼠标虚拟设备示例，提供完整的鼠标操作API：
+   - **屏幕坐标API**：使用像素坐标定位，通过 `set_screen_bounds()` 设置屏幕边界
+   - **HID原始坐标API**：使用 `_raw` 后缀的方法直接操作HID坐标（0-32767）
+   - **移动函数**：`move(from, to)` 和 `humanized_move(from, to)` 接受起点终点参数
+   - **拖动功能**：`drag(from, to)` 和 `humanized_drag(from, to)` 按下左键移动
+   - **按钮操作**：左键、右键、中键、点击、双击
+   
+   `set_screen_bounds(x1, y1, x2, y2)` 工作原理：
+   - 定义屏幕坐标的有效范围边界，如 `bounds(0, 0, 1920, 1080)` 表示屏幕范围 [0, 1920] × [0, 1080]
+   - 屏幕坐标通过线性映射转换为 HID 坐标 [0, 32767]
+   - 超出 bounds 的坐标会被 clamp 到边界值
+   - 注意：Windows 主机不接受 HID (0, 0)，建议屏幕坐标避开 (x1, y1) 边界
+6. libusb_server
+
+   转发本机的usb设备，带一个非常简陋的命令行，输入`h`查看用法，可自行选择转发哪些设备。
+   通过添加虚拟usb设备可实现和真实设备共享同一个usbip server
+7. mock_msc
+
+   虚拟 USB 大容量存储（U盘）设备，用磁盘镜像文件作为存储介质。
+   支持 BOT (Bulk-Only Transport) 协议和常见 SCSI 命令（INQUIRY、READ CAPACITY、
+   READ(10)、WRITE(10)、MODE SENSE 等）。通过 `StorageBackend` 抽象接口可替换底层存储
+   —— 示例使用 `RawImageBackend` 以内存映射文件实现，也可通过多态接入 qcow2 等自定义后端。
+
+   使用：`mock_msc [disk.img]`（默认 `disk.img`，4096 块 × 512 字节 = 2 MiB）
+
+8. termux_libusb_server
+
+   可在非root安卓设备的termux中使用的libusb server，通过
+   `termux-usb -e /path/to/termux_libusb_server /dev/bus/usb/xxx/xxx`启动。
+
+   由于termux-usb只支持传入一个fd，因此可使用不同端口启动多个服务器以支持多个设备。
+   使用`USBIPDCPP_LISTEN_PORT`环境变量来指定监听端口
+
+   termux-usb的使用可查看termux官方的相关文档
+---
+
+## 编译安装
+
+若使用gcc编译，最低gcc版本为**gcc13**。**gcc14**之下的C++23标准支持都是残的，
+不是`std::println`不支持就是`std::format`不支持，用得一点也不舒服。
+为了兼容性只能放弃编程体验。所以我选择了支持`std::format`但仍不支持`std::println`的gcc13
+
+有多个CMake选项用于控制相应模块是否编译：
+
+| 选项 | 默认值 | 说明 |
+|------|--------|------|
+| `USBIPDCPP_BUILD_LIBUSB_COMPONENTS` | ON | 编译基于libusb的服务器组件 |
+| `USBIPDCPP_BUILD_EXAMPLES` | ON (顶级项目) | 编译所有示例程序 |
+| `USBIPDCPP_BUILD_TESTS` | ON (顶级项目) | 编译测试套件 |
+
+更多选项详见 `CMakeLists.txt`
+
+### Python 绑定
+
+Python 绑定使用 pybind11，需要先安装 `pybind11`（vcpkg 或 pip 均可）。
+
+**编译：**
+```bash
+cmake -B build -DUSBIPDCPP_BUILD_PYTHON_BINDINGS=ON
+cmake --build build
+```
+
+编译后设置 PYTHONPATH 并测试：
+```bash
+# Windows
+set PYTHONPATH=build/python_package
+python examples/python/test_absolute_mouse.py
+# Linux/macOS
+export PYTHONPATH=build/python_package
+python examples/python/test_absolute_mouse.py
+```
+
+**依赖：**
+- pybind11（vcpkg 安装：`./vcpkg install pybind11`，或 pip：`pip install pybind11`）
+- 可选，用于生成 `.pyi` 存根文件：`pip install pybind11-stubgen`
+
+**注意事项：**
+- `send_input_report()` 接收 `bytes`：`handler.send_input_report(b'\x01\x00\x00\x00')`
+- Python 可继承 `HidVirtualInterfaceHandler` 实现自定义 HID 设备（参考 `examples/python/flip_left_button.py`）
+- `start()` 和 `stop()` 会释放 Python GIL，可在主线程安全调用
+
+### Python 绑定开发状态 🚧
+
+Python 绑定正在**积极开发中**，可能存在 bug 或崩溃问题。
+
+如果你遇到报错：
+
+1. **提 issue**，附上完整的 Python 回溯（traceback）
+2. **获取 C++ 堆栈**：在 CLion 中调试原生应用程序
+   - Run → Edit Configurations → Add New → **Native Application**
+   - Target：选择 `usbipdcpp_python`
+   - Executable：选择 `python.exe` 路径
+   - Program arguments：目标脚本路径（如 `examples/python/flip_left_button.py`）
+   - Working directory：项目根目录
+   
+   CLion 会在崩溃时断住，显示完整的 C++ 调用栈。
+
+3. 请提供：
+   - Python 版本和操作系统
+   - 使用的构建配置
+   - 完整的错误输出（Python 回溯 + C++ 堆栈）
+   - 最小可复现代码
+
+### 完整编译命令：
+
+#### 使用vcpkg包管理器
+请提前装好asio libusb libevdev spdlog等库
+```bash
+cmake -B build \
+-DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
+cmake --build build
+cmake --install build
+```
+
+#### 使用conan作为包管理器：
+```bash
+conan install . --build=missing -s build_type=Release
+cmake --preset conan-release
+cmake --build build/Release
+cmake --install build/Release
+```
+
+---
+
+## 使用
+
+```cmake
+find_package(usbipdcpp CONFIG REQUIRED)
+target_link_libraries(main PRIVATE usbipdcpp::usbipdcpp)
+
+# 或者想使用libusb功能
+
+find_package(usbipdcpp CONFIG REQUIRED COMPONENTS libusb)
+target_link_libraries(main PRIVATE usbipdcpp::usbipdcpp usbipdcpp::libusb)
+```
+
+---
+
+## 许可证
+
+本项目使用 [LGPLv3](LICENSE) 许可证。
+
+如需闭源或商业授权，请联系：yun_small@163.com
+
+---
+
+## 致谢
+
+本项目受益于以下开源项目：
+
+- [usbipd-libusb](https://github.com/raydudu/usbipd-libusb)
+- [usbip](https://github.com/jiegec/usbip)

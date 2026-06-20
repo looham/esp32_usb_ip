@@ -1,0 +1,39 @@
+#pragma once
+
+#include <cstdint>
+
+#include "Export.h"
+#include "Endpoint.h"
+#include "network.h"
+
+namespace usbipdcpp {
+class VirtualInterfaceHandler;
+
+struct USBIPDCPP_API UsbInterface {
+    std::uint8_t interface_class;
+    std::uint8_t interface_subclass;
+    std::uint8_t interface_protocol;
+
+    std::vector<UsbEndpoint> endpoints;
+
+    std::shared_ptr<VirtualInterfaceHandler> handler;
+
+    template<typename T, typename... Args>
+    std::shared_ptr<T> with_handler(Args &&... args) {
+        auto new_handler = std::make_shared<T>(*this, std::forward<Args>(args)...);
+        handler = std::dynamic_pointer_cast<VirtualInterfaceHandler>(new_handler);
+        return new_handler;
+    }
+
+    [[nodiscard]] std::vector<std::uint8_t> to_bytes() const;
+    void from_socket(asio::ip::tcp::socket &sock);
+
+    bool operator==(const UsbInterface &other) const {
+        return interface_class == other.interface_class &&
+               interface_subclass == other.interface_subclass &&
+               interface_protocol == other.interface_protocol;
+    };
+};
+
+static_assert(Serializable<UsbInterface>);
+}
