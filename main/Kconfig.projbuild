@@ -1,3 +1,4 @@
+# WiFi defaults (menuconfig). Runtime uses NVS first; these apply only when NVS is empty.
 menu "Usbipdcpp WiFi Configuration"
 
     config USBIPD_WIFI_SSID
@@ -10,6 +11,7 @@ menu "Usbipdcpp WiFi Configuration"
 
 endmenu
 
+# USB/IP chunked transfer: splits large transfers to reduce DMA memory pressure.
 menu "USB/IP Transfer Configuration"
 
     config USBIPD_ENABLE_CHUNKED_TRANSFER
